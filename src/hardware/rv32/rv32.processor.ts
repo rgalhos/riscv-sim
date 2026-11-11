@@ -176,10 +176,25 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
     pc: this.PC_START,
   };
 
-  public cpu: IRVCPU = Object.assign({}, this.initialCpuState);
+  private cloneInitialCpuState(): IRVCPU {
+    return {
+      ...this.initialCpuState,
+      register: { ...this.initialCpuState.register },
+      registerF: { ...this.initialCpuState.registerF },
+    };
+  }
+
+  public cpu: IRVCPU = this.cloneInitialCpuState();
+
+  private _pcWritten = false;
+
+  private jumpTo(target: bigint) {
+    this.cpu.pc = target;
+    this._pcWritten = true;
+  }
 
   public resetState(options?: { clearMemory?: boolean }) {
-    this.cpu = Object.assign({}, this.initialCpuState);
+    this.cpu = this.cloneInitialCpuState();
 
     super.resetState(options);
   }
@@ -467,7 +482,11 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
                 op = rv_opcode["fmin.s"];
                 break;
               case 0b11000:
-                op = rv_opcode["fcvt.w.s"];
+                if (bytecode & (1n << 20n)) {
+                  op = rv_opcode["fcvt.wu.s"];
+                } else {
+                  op = rv_opcode["fcvt.w.s"];
+                }
                 break;
               case 0b11100:
                 op = rv_opcode["fmv.x.w"];
@@ -581,6 +600,9 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
         dec.imm = operand_imm_j(bytecode);
         break;
       case rv_codec.r4:
+        dec.rd = operand_rd(bytecode);
+        dec.rs1 = operand_rs1(bytecode);
+        dec.rs2 = operand_rs2(bytecode);
         dec.rs3 = operand_funct7(bytecode) >> 2;
         // dec.fmt = operand_funct7(bytecode) & 0b11;
         dec.rm = operand_funct3(bytecode);
@@ -637,31 +659,31 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
         return;
       case rv_opcode.jal:
         this.registerWrite(d.rd, pc + 4n);
-        this.cpu.pc = u32(pc + d.imm);
+        this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.jalr: {
         const t = u32(v1 + d.imm) & ~1n;
         this.registerWrite(d.rd, pc + 4n);
-        this.cpu.pc = t;
+        this.jumpTo(t);
         return;
       }
       case rv_opcode.beq:
-        if (v1 === v2) this.cpu.pc = u32(pc + d.imm);
+        if (v1 === v2) this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.bne:
-        if (v1 !== v2) this.cpu.pc = u32(pc + d.imm);
+        if (v1 !== v2) this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.blt:
-        if (s32(v1) < s32(v2)) this.cpu.pc = u32(pc + d.imm);
+        if (s32(v1) < s32(v2)) this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.bge:
-        if (s32(v1) >= s32(v2)) this.cpu.pc = u32(pc + d.imm);
+        if (s32(v1) >= s32(v2)) this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.bltu:
-        if (u32(v1) < u32(v2)) this.cpu.pc = u32(pc + d.imm);
+        if (u32(v1) < u32(v2)) this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.bgeu:
-        if (u32(v1) >= u32(v2)) this.cpu.pc = u32(pc + d.imm);
+        if (u32(v1) >= u32(v2)) this.jumpTo(u32(pc + d.imm));
         return;
       case rv_opcode.lb: {
         const addr = u32(v1 + d.imm);
@@ -791,6 +813,7 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
 
           let i = 0;
           const str = String.fromCharCode(...memory.slice(0, nulIdx)).replace(/%d|%u|%x|%X|%c|%p|%f|%%/g, (match) => {
+            if (match === "%%") return "%";
             i++;
             switch (match) {
               case "%d":
@@ -815,8 +838,6 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
                 );
               case "%f":
                 return biguint32_to_f(this.registerRead(rv_reg.a0 + i)).toString();
-              case "%%":
-                return "%";
             }
 
             return match;
@@ -1335,15 +1356,13 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
         }
         return;
       case rv_opcode["fcvt.s.w"]: {
-        // @todo THIS IS WRONG!!!!! CHECK WHICH ONE HANDLES SIGNED/UNSIGNED AND FIX THE OTHER
         // @todo rounding mode
-        this.registerWriteF(d.rd, f_to_biguint(Number(v1)));
+        this.registerWriteF(d.rd, f_to_biguint(Number(s32(v1))));
         return;
       }
       case rv_opcode["fcvt.s.wu"]: {
-        // @todo THIS IS WRONG!!!!! CHECK WHICH ONE HANDLES SIGNED/UNSIGNED AND FIX THE OTHER
         // @todo rounding mode
-        this.registerWriteF(d.rd, f_to_biguint(Number(v1)));
+        this.registerWriteF(d.rd, f_to_biguint(Number(u32(v1))));
         return;
       }
       case rv_opcode["fmv.w.x"]:
@@ -1372,10 +1391,9 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
       return;
     }
 
-    const prevPc = this.cpu.pc;
+    this._pcWritten = false;
     const ret = this.execute(dec);
-    const isUncondJump = dec._op === rv_opcode.jal || dec._op === rv_opcode.jalr;
-    if (!isUncondJump && this.cpu.pc === prevPc) {
+    if (!this._pcWritten) {
       this.cpu.pc += 4n;
     }
 

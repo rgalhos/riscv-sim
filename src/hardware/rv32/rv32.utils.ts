@@ -143,6 +143,12 @@ export function encodeRType_RV32F(op: rv_opcode, rd: bigint, rs1: bigint, rs2: b
   const funct5 = BigInt(op_data.funct7 || 0) << 27n;
   const fmt = 0b00n << 25n;
 
+  if (op === rv_opcode["fcvt.wu.s"] || op === rv_opcode["fcvt.s.wu"]) {
+    rs2 = 1n;
+  } else if (op === rv_opcode["fcvt.w.s"] || op === rv_opcode["fcvt.s.w"]) {
+    rs2 = 0n;
+  }
+
   return funct5 | fmt | (reg5(rs2) << 20n) | (reg5(rs1) << 15n) | funct3 | (reg5(rd) << 7n) | opcode;
 }
 
