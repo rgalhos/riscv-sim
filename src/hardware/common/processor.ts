@@ -300,7 +300,7 @@ export abstract class IProcessor<TDecodedInstruction extends IDecodedInstruction
       case 16:
         this.recordMemoryUndo(addr + 1, this.memory[addr + 1]);
         this._dbgMemChanges.push({
-          address: addr + 2,
+          address: addr + 1,
           value: (this._memoryOperationDiff[addr + 1] = this.memory[addr + 1] = (v >>> 8) & 0xff),
           cycle: this.cycle,
           pc: this.cpu.pc,
@@ -309,7 +309,7 @@ export abstract class IProcessor<TDecodedInstruction extends IDecodedInstruction
       default:
         this.recordMemoryUndo(addr, this.memory[addr]);
         this._dbgMemChanges.push({
-          address: addr + 2,
+          address: addr,
           value: (this._memoryOperationDiff[addr] = this.memory[addr] = v & 0xff),
           cycle: this.cycle,
           pc: this.cpu.pc,
