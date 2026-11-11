@@ -1594,6 +1594,3 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
     return reg;
   }
 }
-
-const x = new RVProcessor();
-void x;
