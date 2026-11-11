@@ -8,6 +8,7 @@ import { HexViewContainer } from "@/containers/hex-view/HexView.container";
 import { MemoryViewContainer } from "@/containers/memory-view/MemoryView.container";
 import { RegisterViewContainer } from "@/containers/register-view/RegisterView.container";
 import type { IAssemblerResult } from "@/hardware/common/simulator";
+import { errorsToDiagnostics, type IDiagnostic } from "@/hardware/rv32/language-service/rv32.diagnostics";
 import { useEditor } from "@/lib/contexts/editor.context";
 import { useSimulator } from "@/lib/contexts/simulator.context";
 import { $settings } from "@/lib/stores/settings.store";
@@ -25,6 +26,7 @@ export function SimulatorContainer() {
   const { editor, focusLine } = useEditor();
 
   const [program, setProgram] = useState<IAssemblerResult>({ instructions: [], labels: {}, errors: [] });
+  const [diagnostics, setDiagnostics] = useState<IDiagnostic[]>([]);
   const [pendingChanges, setPendingChanges] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const activeTab = useStore($simulatorTab);
@@ -58,6 +60,7 @@ export function SimulatorContainer() {
       setPendingChanges(false);
       startTransition(() => {
         setProgram(assembled);
+        setDiagnostics(errorsToDiagnostics(assembled.errors, code));
       });
 
       if (assembled.errors.length > 0) {
@@ -182,7 +185,7 @@ export function SimulatorContainer() {
             <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
               <ResizablePanel defaultSize="66.67%" className="flex min-h-0 flex-col overflow-hidden">
                 <TabsContent value={ETabs.EDITOR} keepMounted className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                  <AssemblerErrors errors={program.errors} />
+                  <AssemblerErrors diagnostics={diagnostics} />
 
                   <EditorContainer handleEditorChange={handleEditorChange} />
                 </TabsContent>

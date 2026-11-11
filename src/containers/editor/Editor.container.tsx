@@ -1,8 +1,9 @@
 import { editorOptions, handleEditorWillMount } from "@/config/editor/editor.config";
+import { attachRiscvDiagnostics } from "@/config/editor/languages/riscv-diagnostics.config";
 import { useEditor } from "@/lib/contexts/editor.context";
 import { debounce } from "@/lib/utils";
 import { Editor, type EditorProps } from "@monaco-editor/react";
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 
 const EDITOR_DRAFT_STORAGE_KEY = "editor_contents";
 
@@ -48,6 +49,14 @@ end:
 
 function MemoEditorContainer(props: { handleEditorChange?: () => void }) {
   const { setEditor, setMonaco } = useEditor();
+  const diagnosticsRef = useRef<ReturnType<typeof attachRiscvDiagnostics> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      diagnosticsRef.current?.dispose();
+      diagnosticsRef.current = null;
+    };
+  }, []);
 
   const saveEditorContents = (content: string) => {
     localStorage.setItem(EDITOR_DRAFT_STORAGE_KEY, content);
@@ -61,6 +70,9 @@ function MemoEditorContainer(props: { handleEditorChange?: () => void }) {
 
     const draft = localStorage.getItem(EDITOR_DRAFT_STORAGE_KEY);
     editor.setValue(draft || DEFAULT_PROGRAM);
+
+    diagnosticsRef.current?.dispose();
+    diagnosticsRef.current = attachRiscvDiagnostics(editor, monaco);
   };
 
   const handleEditorChange: EditorProps["onChange"] = (value, editor) => {
