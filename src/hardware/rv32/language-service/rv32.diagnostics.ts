@@ -105,10 +105,15 @@ function tokenRange(lines: string[], token: IToken): IRange | null {
   return at === -1 ? null : range(idx, at, at + lexeme.length);
 }
 
-function diagnostic(rangeValue: IRange, message: string, code: string): IDiagnostic {
+function diagnostic(
+  rangeValue: IRange,
+  message: string,
+  code: string,
+  severity: EDiagnosticSeverity = EDiagnosticSeverity.Error
+): IDiagnostic {
   return {
     range: rangeValue,
-    severity: EDiagnosticSeverity.Error,
+    severity,
     message,
     source: DIAGNOSTIC_SOURCE,
     code,
@@ -157,6 +162,15 @@ function semanticErrorDiagnostic(e: Error, lines: string[]): IDiagnostic {
   return diagnostic(rangeValue, message, e.message);
 }
 
+function semanticWarningDiagnostic(e: Error, lines: string[]): IDiagnostic {
+  const cause = e.cause as ISemanticErrorCause;
+  const line = cause?.line ?? 1;
+  const symbol = cause?.symbol;
+  const rangeValue = (symbol && wordRange(lines, line, symbol)) || wholeLineRange(lines, line);
+
+  return diagnostic(rangeValue, cause?.message ?? e.message, e.message, EDiagnosticSeverity.Warning);
+}
+
 function causeLine(cause: unknown): number {
   if (Array.isArray(cause)) {
     for (const item of cause) {
@@ -175,6 +189,7 @@ function causeLine(cause: unknown): number {
 function toDiagnostic(e: Error, lines: string[]): IDiagnostic {
   if (e.message === "ASSEMBLER_PARSE_ERROR") return parseErrorDiagnostic(e, lines);
   if (e.message === "ASSEMBLER_SEMANTIC_ERROR") return semanticErrorDiagnostic(e, lines);
+  if (e.message === "ASSEMBLER_SEMANTIC_WARNING") return semanticWarningDiagnostic(e, lines);
 
   const message = MACRO_ERROR_MESSAGES[e.message] ?? e.message;
   return diagnostic(wholeLineRange(lines, causeLine(e.cause)), message, e.message);
@@ -199,7 +214,8 @@ export function getDiagnostics(source: string): IDiagnostic[] {
   let errors: Error[];
 
   try {
-    errors = analyzeSource(source).errors;
+    const result = analyzeSource(source);
+    errors = [...result.errors, ...result.warnings];
   } catch (e) {
     errors = [e instanceof Error ? e : new Error(String(e))];
   }

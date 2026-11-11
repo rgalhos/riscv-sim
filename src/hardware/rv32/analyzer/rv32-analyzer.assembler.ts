@@ -35,6 +35,8 @@ import {
 
 const RV_RELOC_OPS = new Set(["hi", "lo", "pcrel_hi", "pcrel_lo"]);
 
+const SHIFT_IMMEDIATE_OPS = new Set([rv_opcode.slli, rv_opcode.srli, rv_opcode.srai]);
+
 export type IMemoryRegions = {
   PC_START: bigint;
   RODATA_START: bigint;
@@ -79,6 +81,7 @@ export type IAnalyzeResult = {
   units: IAnalyzedUnit[];
   symbols: ISymbolTable;
   errors: Error[];
+  warnings: Error[];
   optExplicitScreenUpdate: boolean;
 };
 
@@ -91,6 +94,7 @@ export type ISemanticErrorCause = {
 type IAnalyzeCtx = {
   regions: IMemoryRegions;
   errors: Error[];
+  warnings: Error[];
   equ: Record<string, IEquEntry>;
   labels: Record<string, bigint>;
   units: IAnalyzedUnit[];
@@ -130,6 +134,96 @@ function pushError(ctx: IAnalyzeCtx, line: number, message: string, symbol?: str
   ctx.errors.push(throwSemanticError(line, message, symbol));
 }
 
+export const createSemanticWarning = (line: number, message: string, symbol?: string) => {
+  return new Error("ASSEMBLER_SEMANTIC_WARNING", { cause: { line, message, symbol } satisfies ISemanticErrorCause });
+};
+
+function pushWarning(ctx: IAnalyzeCtx, line: number, message: string, symbol?: string) {
+  ctx.warnings.push(createSemanticWarning(line, message, symbol));
+}
+
+function immediateRange(op: rv_opcode, codec: rv_codec) {
+  if (SHIFT_IMMEDIATE_OPS.has(op)) return { min: 0n, max: 31n };
+
+  switch (codec) {
+    case rv_codec.i:
+    case rv_codec.s:
+      return { min: -2048n, max: 2047n };
+    case rv_codec.b:
+      return { min: -4096n, max: 4094n };
+    case rv_codec.j:
+      return { min: -1048576n, max: 1048574n };
+    default:
+      return null;
+  }
+}
+
+function dataRange(width: 8 | 16 | 32) {
+  return { min: -(1n << BigInt(width - 1)), max: (1n << BigInt(width)) - 1n };
+}
+
+function exprSymbol(expr: IExpr): string | undefined {
+  if (expr.kind === EKind.NUM) return String(expr.value);
+  if (expr.kind === EKind.SYM) return expr.name;
+  return undefined;
+}
+
+function checkImmediateRange(
+  ctx: IAnalyzeCtx,
+  line: number,
+  op: rv_opcode,
+  codec: rv_codec,
+  value: bigint,
+  symbol?: string,
+  isAddress = false
+) {
+  const range = immediateRange(op, codec);
+  if (!range || (value >= range.min && value <= range.max)) return;
+
+  const name = RV_OPCODE_DATA[op].name;
+  const bounds = `${range.min}..${range.max}`;
+
+  if (SHIFT_IMMEDIATE_OPS.has(op)) {
+    pushWarning(ctx, line, `Shift amount ${value} out of range for ${name} (${bounds})`, symbol);
+    return;
+  }
+
+  if (codec === rv_codec.b || codec === rv_codec.j) {
+    const kind = codec === rv_codec.b ? "Branch" : "Jump";
+
+    pushWarning(ctx, line, `${kind} target out of reach for ${name}: offset ${value} (${bounds})`, symbol);
+
+    return;
+  }
+
+  let message = `Immediate ${value} out of range for ${name} (${bounds}); encoded as ${BigInt.asIntN(12, value)}`;
+  if (isAddress && symbol) {
+    message += `. Use "la" to load the address of ${symbol}`;
+  }
+
+  pushWarning(ctx, line, message, symbol);
+}
+
+function checkDataRange(
+  ctx: IAnalyzeCtx,
+  line: number,
+  directive: string,
+  width: 8 | 16 | 32,
+  value: bigint,
+  symbol?: string
+) {
+  const range = dataRange(width);
+  if (value >= range.min && value <= range.max) return;
+
+  const stored = BigInt.asUintN(width, value);
+  pushWarning(
+    ctx,
+    line,
+    `Value ${value} out of range for ${directive} (${range.min}..${range.max}); stored as ${stored}`,
+    symbol
+  );
+}
+
 function numExpr(value: number | bigint): IExpr {
   return { kind: EKind.NUM, value: Number(value) };
 }
@@ -155,7 +249,7 @@ function operandToExpr(op: IOperand): IExpr {
 function resolveRegOperand(
   ctx: IAnalyzeCtx,
   op: IOperand | undefined,
-  line: number, 
+  line: number,
   regKind: typeof rv_reg | typeof rv_reg_f = rv_reg
 ): number | null {
   if (!op) {
@@ -674,6 +768,12 @@ function analyzeRealInstruction(ctx: IAnalyzeCtx, origin: number, parseLine: num
   const setImm = (expr: IExpr) => {
     const result = resolveImm(ctx, expr, origin, pc, dec.codec);
     if (!result) return false;
+
+    if (!result.pending && expr.kind !== EKind.RELOC) {
+      const isAddress = expr.kind === EKind.SYM && ctx.labels[qualifyLabel(expr.name, ctx.scope)] !== undefined;
+      checkImmediateRange(ctx, origin, opcode, dec.codec, result.value, exprSymbol(expr), isAddress);
+    }
+
     if (dec.codec === rv_codec.i || dec.codec === rv_codec.s) {
       dec.imm = result.value & 0xfffn;
     } else if (dec.codec === rv_codec.u) {
@@ -681,7 +781,9 @@ function analyzeRealInstruction(ctx: IAnalyzeCtx, origin: number, parseLine: num
     } else {
       dec.imm = result.value;
     }
+
     pending = result.pending;
+
     return true;
   };
 
@@ -890,7 +992,10 @@ function analyzeDirective(ctx: IAnalyzeCtx, line: number, stmt: IStatement) {
         }
 
         const val = resolveNumeric(ctx, arg, line);
-        if (val !== null) values.push(val);
+        if (val === null) continue;
+
+        checkDataRange(ctx, line, stmt.name, width, val, exprSymbol(arg));
+        values.push(val);
       }
 
       if (values.length === 0) return;
@@ -1048,6 +1153,12 @@ function resolvePendingFixups(ctx: IAnalyzeCtx) {
       } else if (pending.codec === rv_codec.i) {
         decoded.imm = labelAddr;
       }
+
+      if (pending.codec !== rv_codec.u) {
+        const isLocal = unit.scope !== "" && pending.sym.startsWith(`${unit.scope}.`);
+        const symbol = isLocal ? pending.sym.slice(unit.scope.length) : pending.sym;
+        checkImmediateRange(ctx, line, decoded._op, pending.codec, decoded.imm, symbol, pending.codec === rv_codec.i);
+      }
     }
 
     decoded.bytecode = toBytecode(decoded);
@@ -1061,6 +1172,7 @@ export function analyze(parseResult: IParseResult): IAnalyzeResult {
   const ctx: IAnalyzeCtx = {
     regions,
     errors: [],
+    warnings: [],
     equ: {},
     labels: {},
     units: [],
@@ -1080,6 +1192,7 @@ export function analyze(parseResult: IParseResult): IAnalyzeResult {
     units: ctx.units,
     symbols: { labels: ctx.labels, equ: ctx.equ },
     errors: [...parseResult.errors, ...ctx.errors],
+    warnings: ctx.warnings,
     optExplicitScreenUpdate: ctx.optExplicitScreenUpdate,
   };
 }
