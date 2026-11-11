@@ -141,7 +141,12 @@ const InstructionRow = memo(function MemoInstructionRow(props: { inst: IInstruct
         </span>
       </TableCell>
       <TableCell>
-        <a href={props.inst.manual}>
+        <a
+          href={props.inst.manual}
+          target="_blank"
+          rel="noopener noreferrer"
+          // aria-label={`Open manual for ${/* props.idk @todo the name doesnt get to here */}`}
+        >
           <BookText />
         </a>
       </TableCell>
