@@ -2,8 +2,20 @@ import { rv_consts, rv_directives, rv_opcode, rv_opcode_pseudo, rv_reg, rv_reg_f
 import { rvManual } from "@/hardware/rv32/user/riscv.manual";
 import type { Monaco } from "@monaco-editor/react";
 
+let registration: { dispose(): void }[] | null = null;
+
+import.meta.hot?.dispose(() => {
+  registration?.forEach((d) => d.dispose());
+  registration = null;
+});
+
 export function registerRiscvLanguage(monaco: Monaco) {
-  monaco.languages.register({ id: "riscv" });
+  if (registration) return;
+  registration = [];
+
+  if (!monaco.languages.getLanguages().some((l: { id: string }) => l.id === "riscv")) {
+    monaco.languages.register({ id: "riscv" });
+  }
 
   const instructions = Object.keys(rv_opcode)
     .concat(Object.keys(rv_opcode_pseudo))
@@ -14,7 +26,7 @@ export function registerRiscvLanguage(monaco: Monaco) {
     .concat(Object.keys(rv_reg_f))
     .filter((v) => !!Number.isNaN(+v));
 
-  monaco.languages.setMonarchTokensProvider("riscv", {
+  const tokens = monaco.languages.setMonarchTokensProvider("riscv", {
     instructions: instructions.concat(instructions.map((v) => v.toUpperCase())),
     registers: registers.concat(registers.map((v) => v.toUpperCase())),
     directives: directives.concat(directives.map((v) => v.toUpperCase())),
@@ -56,7 +68,7 @@ export function registerRiscvLanguage(monaco: Monaco) {
     },
   });
 
-  monaco.languages.setLanguageConfiguration("riscv", {
+  const configuration = monaco.languages.setLanguageConfiguration("riscv", {
     comments: {
       lineComment: "#",
     },
@@ -87,7 +99,7 @@ export function registerRiscvLanguage(monaco: Monaco) {
     manualEntries[c.name.toLowerCase()] = [{ value: c.description }];
   }
 
-  monaco.languages.registerCompletionItemProvider("riscv", {
+  const completion = monaco.languages.registerCompletionItemProvider("riscv", {
     triggerCharacters: [".", "%"],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     provideCompletionItems: (model: any, position: any) => {
@@ -137,7 +149,7 @@ export function registerRiscvLanguage(monaco: Monaco) {
     },
   });
 
-  monaco.languages.registerHoverProvider("riscv", {
+  const hover = monaco.languages.registerHoverProvider("riscv", {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     provideHover: (model: any, position: any) => {
       const lineContent = model.getLineContent(position.lineNumber);
@@ -164,4 +176,6 @@ export function registerRiscvLanguage(monaco: Monaco) {
       }
     },
   });
+
+  registration.push(tokens, configuration, completion, hover);
 }
