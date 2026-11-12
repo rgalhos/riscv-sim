@@ -1,25 +1,33 @@
 {
-  "short_name": "WIMS",
-  "name": "WIMS Simulator",
+  "id": "/",
+  "short_name": "RV-SIM",
+  "name": "RV-SIM - Online RISC-V Simulator",
+  "description": "Free online RISC-V (RV32IMF) simulator for learning assembly: code editor, step-by-step debugging, register and memory inspection, syscalls, screen and keyboard I/O.",
+  "lang": "en",
+  "categories": ["education", "developer", "utilities"],
   "icons": [
     {
-      "src": "favicon.ico",
-      "sizes": "64x64 32x32 24x24 16x16",
+      "src": "/favicon.ico",
+      "sizes": "32x32 16x16",
       "type": "image/x-icon"
     },
     {
-      "src": "logo192.png",
+      "src": "/logo192.png",
       "type": "image/png",
-      "sizes": "192x192"
+      "sizes": "192x192",
+      "purpose": "any"
     },
     {
-      "src": "logo512.png",
+      "src": "/logo512.png",
       "type": "image/png",
-      "sizes": "512x512"
+      "sizes": "512x512",
+      "purpose": "any"
     }
   ],
-  "start_url": ".",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "any",
   "theme_color": "#000000",
   "background_color": "#ffffff"
 }

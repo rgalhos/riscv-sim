@@ -2,13 +2,78 @@
 <html lang="en">
   <head>
     <!-- <script src="https://unpkg.com/react-scan/dist/auto.global.js" crossorigin="anonymous"></script> -->
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.ico" />
+    <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RV-SIM: Educational RISC-V Simulator</title>
+    <title>RV-SIM - Online RISC-V Simulator for Learning Assembly</title>
+    <meta
+      name="description"
+      content="Free online RISC-V (RV32IMF) simulator for learning assembly: code editor, step-by-step debugging, register and memory inspection, syscalls, screen and keyboard I/O."
+    />
+    <meta
+      name="keywords"
+      content="RISC-V, RV32I, RV32IMF, RISC-V simulator, RISC-V emulator, assembly, online assembler, computer architecture, educational simulator"
+    />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <link rel="canonical" href="%VITE_SITE_URL%/" />
+
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/logo192.png" />
+    <link rel="apple-touch-icon" href="/logo192.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#000000" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="RV-SIM" />
+    <meta property="og:url" content="%VITE_SITE_URL%/" />
+    <meta property="og:title" content="RV-SIM - Online RISC-V Simulator for Learning Assembly" />
+    <meta
+      property="og:description"
+      content="Write, assemble and debug RISC-V (RV32IMF) assembly in your browser, with step-by-step execution, register and memory inspection, and screen and keyboard I/O."
+    />
+    <meta property="og:image" content="%VITE_SITE_URL%/logo512.png" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta property="og:image:alt" content="RV-SIM logo" />
+    <meta property="og:locale" content="en_US" />
+
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="RV-SIM - Online RISC-V Simulator for Learning Assembly" />
+    <meta
+      name="twitter:description"
+      content="Write, assemble and debug RISC-V (RV32IMF) assembly in your browser, with step-by-step execution, register and memory inspection, and screen and keyboard I/O."
+    />
+    <meta name="twitter:image" content="%VITE_SITE_URL%/logo512.png" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "RV-SIM",
+        "url": "%VITE_SITE_URL%/",
+        "description": "Free online RISC-V (RV32IMF) simulator for learning assembly: code editor, step-by-step debugging, register and memory inspection, syscalls, screen and keyboard I/O.",
+        "applicationCategory": "EducationalApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript and a modern web browser",
+        "isAccessibleForFree": true,
+        "inLanguage": "en",
+        "image": "%VITE_SITE_URL%/logo512.png",
+        "featureList": [
+          "Built-in RISC-V assembly code editor",
+          "Step-by-step execution and debugging",
+          "Register and memory visualization",
+          "Syscalls with terminal output",
+          "Screen and keyboard I/O",
+          "RV32I, RV32M and RV32F instruction sets"
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <h1>RV-SIM - Online RISC-V Simulator</h1>
+      <p>Please enable JavaScript to use the simulator.</p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
