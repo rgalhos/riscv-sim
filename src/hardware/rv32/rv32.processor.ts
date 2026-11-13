@@ -624,8 +624,7 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
   }
 
   public decode(inst: bigint) {
-    // @ts-expect-error bigint as index
-    const cached = this.instructionCache[inst];
+    const cached = this.instructionCache.get(inst);
 
     if (cached) {
       return cached;
@@ -634,8 +633,7 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
     const dec = this.fromBytecode(inst);
 
     if (dec.codec !== rv_codec.illegal) {
-      // @ts-expect-error bigint as index
-      this.instructionCache[inst] = dec;
+      this.instructionCache.set(inst, dec);
     }
 
     return dec;

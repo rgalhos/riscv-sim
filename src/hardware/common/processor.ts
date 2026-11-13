@@ -113,8 +113,7 @@ export abstract class IProcessor<TDecodedInstruction extends IDecodedInstruction
    */
   public abstract cpu: ICPU;
 
-  // @ts-expect-error ts(1268) - bigint as literal
-  protected instructionCache: { [bytecode: bigint]: TDecodedInstruction } = {};
+  protected instructionCache = new Map<bigint, TDecodedInstruction>();
 
   protected readonly undoHistoryLimit = 50;
   protected _undoStack: IStepUndoFrame<TDecodedInstruction>[] = [];
