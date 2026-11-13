@@ -72,6 +72,9 @@ const KNOWN_DIRECTIVES = new Set([
   ".asciz",
   ".macro",
   ".endm",
+  ".globl",
+  ".global",
+  ".zero",
 ]);
 
 export const stringifyTokenizerError = (e: Error) => {

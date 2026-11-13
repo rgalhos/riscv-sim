@@ -69,7 +69,7 @@ function MemoEditorContainer(props: { handleEditorChange?: () => void }) {
     setMonaco(monaco);
 
     const draft = localStorage.getItem(EDITOR_DRAFT_STORAGE_KEY);
-    editor.setValue(draft || DEFAULT_PROGRAM);
+    editor.setValue(draft ?? DEFAULT_PROGRAM);
 
     diagnosticsRef.current?.dispose();
     diagnosticsRef.current = attachRiscvDiagnostics(editor, monaco);
@@ -78,9 +78,7 @@ function MemoEditorContainer(props: { handleEditorChange?: () => void }) {
   const handleEditorChange: EditorProps["onChange"] = (value, editor) => {
     void editor;
 
-    if (value) {
-      saveEditorContentsDebounced(value);
-    }
+    saveEditorContentsDebounced(value ?? "");
 
     props?.handleEditorChange?.();
   };

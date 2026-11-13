@@ -37,6 +37,17 @@ const RV_RELOC_OPS = new Set(["hi", "lo", "pcrel_hi", "pcrel_lo"]);
 
 const SHIFT_IMMEDIATE_OPS = new Set([rv_opcode.slli, rv_opcode.srli, rv_opcode.srai]);
 
+const F_UNARY_OPS = new Set([
+  rv_opcode["fsqrt.s"],
+  rv_opcode["fcvt.w.s"],
+  rv_opcode["fcvt.wu.s"],
+  rv_opcode["fmv.x.w"],
+  rv_opcode["fclass.s"],
+  rv_opcode["fcvt.s.w"],
+  rv_opcode["fcvt.s.wu"],
+  rv_opcode["fmv.w.x"],
+]);
+
 export type IMemoryRegions = {
   PC_START: bigint;
   RODATA_START: bigint;
@@ -89,18 +100,25 @@ export type ISemanticErrorCause = {
   line: number;
   message: string;
   symbol?: string;
+  symbolInMessage?: boolean;
 };
+
+type ISection = ".text" | ".data" | ".rodata" | ".bss";
 
 type IAnalyzeCtx = {
   regions: IMemoryRegions;
   errors: Error[];
   warnings: Error[];
   equ: Record<string, IEquEntry>;
+  knownEqu: Record<string, IEquEntry>;
   labels: Record<string, bigint>;
+  definedLabels: Set<string>;
+  pendingLabels: string[];
   units: IAnalyzedUnit[];
   addr: bigint;
+  section: ISection;
+  sectionAddr: Record<ISection, bigint>;
   scope: string;
-  globalLabel: string;
   optExplicitScreenUpdate: boolean;
 };
 
@@ -126,12 +144,20 @@ export const throwSemanticError = (line: number, message: string, symbol?: strin
 export const stringifySemanticError = (e: Error) => {
   if (e.message !== "ASSEMBLER_SEMANTIC_ERROR") return e.toString();
   const cause = e.cause as ISemanticErrorCause;
-  if (cause.symbol) return `${cause.message} (${cause.symbol}) at line ${cause.line}`;
+  if (cause.symbol && !cause.symbolInMessage) return `${cause.message} (${cause.symbol}) at line ${cause.line}`;
   return `${cause.message} at line ${cause.line}`;
 };
 
 function pushError(ctx: IAnalyzeCtx, line: number, message: string, symbol?: string) {
   ctx.errors.push(throwSemanticError(line, message, symbol));
+}
+
+function pushErrorAt(ctx: IAnalyzeCtx, line: number, message: string, symbol?: string) {
+  ctx.errors.push(
+    new Error("ASSEMBLER_SEMANTIC_ERROR", {
+      cause: { line, message, symbol, symbolInMessage: true } satisfies ISemanticErrorCause,
+    })
+  );
 }
 
 export const createSemanticWarning = (line: number, message: string, symbol?: string) => {
@@ -153,6 +179,8 @@ function immediateRange(op: rv_opcode, codec: rv_codec) {
       return { min: -4096n, max: 4094n };
     case rv_codec.j:
       return { min: -1048576n, max: 1048574n };
+    case rv_codec.u:
+      return { min: 0n, max: 0xfffffn };
     default:
       return null;
   }
@@ -178,9 +206,16 @@ function checkImmediateRange(
   isAddress = false
 ) {
   const range = immediateRange(op, codec);
+  const name = RV_OPCODE_DATA[op].name;
+  const isControlTransfer = codec === rv_codec.b || codec === rv_codec.j;
+
+  if (isControlTransfer && (value & 1n) !== 0n) {
+    pushErrorAt(ctx, line, `${name} target must be 2-byte aligned: offset ${value} is odd`, symbol);
+    return;
+  }
+
   if (!range || (value >= range.min && value <= range.max)) return;
 
-  const name = RV_OPCODE_DATA[op].name;
   const bounds = `${range.min}..${range.max}`;
 
   if (SHIFT_IMMEDIATE_OPS.has(op)) {
@@ -188,11 +223,21 @@ function checkImmediateRange(
     return;
   }
 
-  if (codec === rv_codec.b || codec === rv_codec.j) {
+  if (isControlTransfer) {
     const kind = codec === rv_codec.b ? "Branch" : "Jump";
 
-    pushWarning(ctx, line, `${kind} target out of reach for ${name}: offset ${value} (${bounds})`, symbol);
+    pushErrorAt(ctx, line, `${kind} target out of reach for ${name}: offset ${value} (${bounds})`, symbol);
 
+    return;
+  }
+
+  if (codec === rv_codec.u) {
+    pushWarning(
+      ctx,
+      line,
+      `Immediate ${value} out of range for ${name} (${bounds}); encoded as ${BigInt.asUintN(20, value)}`,
+      symbol
+    );
     return;
   }
 
@@ -253,6 +298,7 @@ function resolveRegOperand(
   regKind: typeof rv_reg | typeof rv_reg_f = rv_reg
 ): number | null {
   if (!op) {
+    pushError(ctx, line, "Missing register operand");
     return null;
   } else if (op.kind === EKind.REG) {
     return resolveRegister(ctx, op.name, line, regKind);
@@ -365,7 +411,7 @@ function followEquExpr(ctx: IAnalyzeCtx, name: string, line: number, seen = new 
   const builtin = builtinValue(ctx, name);
   if (builtin !== undefined) return numExpr(builtin);
 
-  const entry = ctx.equ[name];
+  const entry = ctx.equ[name] ?? ctx.knownEqu[name];
   if (!entry) return symExpr(name);
 
   if (entry.kind === EKind.SYM) {
@@ -422,7 +468,7 @@ function evalExpr(ctx: IAnalyzeCtx, expr: IExpr, line: number): bigint | null {
       const left = evalExpr(ctx, expr.left, line);
       const right = evalExpr(ctx, expr.right, line);
       if (left === null || right === null) return null;
-      return expr.op === "+" ? left + right : left - right;
+      return evalBinaryOp(ctx, expr.op, left, right, line);
     }
 
     case EKind.RELOC:
@@ -457,18 +503,7 @@ function resolveConstantOnly(ctx: IAnalyzeCtx, expr: IExpr, line: number): bigin
 }
 
 function resolveNumeric(ctx: IAnalyzeCtx, expr: IExpr, line: number): bigint | null {
-  const val = resolveConstantOnly(ctx, expr, line);
-  if (val !== null) return val;
-
-  if (expr.kind === EKind.SYM) {
-    const labelName = qualifyLabel(expr.name, ctx.scope);
-    if (ctx.labels[labelName] !== undefined) {
-      return ctx.labels[labelName];
-    }
-    pushError(ctx, line, "Undeclared symbol", expr.name);
-  }
-
-  return null;
+  return evalExpr(ctx, expr, line);
 }
 
 function lookupRegister(name: string, regKind: typeof rv_reg | typeof rv_reg_f = rv_reg): number | undefined {
@@ -545,14 +580,21 @@ function resolveImm(ctx: IAnalyzeCtx, expr: IExpr, line: number, pc: bigint, cod
       };
     }
 
-    pushError(ctx, line, "Invalid relocation argument");
-    return null;
+    if (arg.kind === EKind.RELOC) {
+      pushError(ctx, line, "Invalid relocation argument");
+      return null;
+    }
+
+    const value = evalExpr(ctx, arg, line);
+    if (value === null) return null;
+
+    return { value: relocImmediate(expr.op, value, pc) };
   }
 
   if (expr.kind === EKind.SYM) {
     const num = resolveConstantOnly(ctx, expr, line);
     if (num !== null) {
-      if (codec === rv_codec.u) return { value: (num >> 12n) & 0xfffffn };
+      if (codec === rv_codec.j || codec === rv_codec.b) return { value: num - pc };
       return { value: num };
     }
 
@@ -585,8 +627,6 @@ function resolveImm(ctx: IAnalyzeCtx, expr: IExpr, line: number, pc: bigint, cod
     return { value: num - pc, pending: undefined };
   }
 
-  if (codec === rv_codec.u) return { value: (num >> 12n) & 0xfffffn };
-
   return { value: num };
 }
 
@@ -602,6 +642,7 @@ function emitInstruction(
   pending?: IPendingFixup
 ) {
   ctx.addr = alignAddr(ctx.addr);
+  bindPendingLabels(ctx);
   decoded.bytecode = toBytecode(decoded);
   ctx.units.push({
     kind: "instruction",
@@ -615,12 +656,120 @@ function emitInstruction(
   ctx.addr += 4n;
 }
 
+function bindPendingLabels(ctx: IAnalyzeCtx) {
+  for (const name of ctx.pendingLabels) {
+    ctx.labels[name] = ctx.addr;
+  }
+
+  ctx.pendingLabels = [];
+}
+
+const PSEUDO_ARITY: Record<string, number | [number, number]> = {
+  nop: 0,
+  ret: 0,
+  mv: 2,
+  not: 2,
+  neg: 2,
+  seqz: 2,
+  snez: 2,
+  sltz: 2,
+  sgtz: 2,
+  sgt: 3,
+  sgtu: 3,
+  j: 1,
+  jr: 1,
+  jump: 2,
+  beqz: 2,
+  bnez: 2,
+  blez: 2,
+  bgez: 2,
+  bltz: 2,
+  bgtz: 2,
+  bgt: 3,
+  ble: 3,
+  bgtu: 3,
+  bleu: 3,
+  la: 2,
+  li: 2,
+  call: [1, 2],
+  "fmv.s": 2,
+  "fneg.s": 2,
+  "fabs.s": 2,
+};
+
+function realOperandArity(opcode: rv_opcode, ops: IOperand[]): number | [number, number] {
+  const data = RV_OPCODE_DATA[opcode];
+  const memForm = ops[1]?.kind === EKind.MEM;
+
+  if (opcode === rv_opcode.ecall || opcode === rv_opcode.ebreak) return 0;
+
+  switch (data.codec) {
+    case rv_codec.r:
+      if (data.extension !== rv_ext.RV32F) return 3;
+      return F_UNARY_OPS.has(opcode) ? 2 : 3;
+    case rv_codec.i:
+      if (memForm) return 2;
+      return opcode === rv_opcode.jalr ? [1, 3] : 3;
+    case rv_codec.s:
+      return memForm || ops[0]?.kind === EKind.MEM ? 2 : 3;
+    case rv_codec.b:
+      return 3;
+    case rv_codec.u:
+      return 2;
+    case rv_codec.j:
+      return [1, 2];
+    case rv_codec.r4:
+      return 4;
+    default:
+      return ops.length;
+  }
+}
+
+function checkArity(ctx: IAnalyzeCtx, line: number, mnemonic: string, count: number, arity: number | [number, number]) {
+  const [min, max] = Array.isArray(arity) ? arity : [arity, arity];
+  if (count >= min && count <= max) return true;
+
+  const expected = min === max ? `${min}` : `${min} to ${max}`;
+  const noun = max === 1 ? "operand" : "operands";
+  pushErrorAt(ctx, line, `${mnemonic} expects ${expected} ${noun}, got ${count}`, mnemonic);
+
+  return false;
+}
+
 function lowerPseudo(stmt: IStatement): IStatement[] | null {
   if (stmt.kind !== EKind.INSTRUCTION) return null;
 
   const { mnemonic, operands: ops } = stmt;
 
   switch (mnemonic) {
+    case "sgt":
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "slt", operands: [ops[0], ops[2], ops[1]] }];
+    case "sgtu":
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "sltu", operands: [ops[0], ops[2], ops[1]] }];
+    case "jr":
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "jalr", operands: [regOp("zero"), ops[0], exprOp(numExpr(0))] }];
+    case "jump": {
+      const scratch = ops[1];
+      const target = operandToExpr(ops[0]);
+      return [
+        {
+          kind: EKind.INSTRUCTION,
+          mnemonic: "auipc",
+          operands: [scratch, exprOp({ kind: EKind.RELOC, op: "pcrel_hi", arg: target })],
+        },
+        {
+          kind: EKind.INSTRUCTION,
+          mnemonic: "jalr",
+          operands: [regOp("zero"), scratch, exprOp({ kind: EKind.RELOC, op: "pcrel_lo", arg: target })],
+        },
+      ];
+    }
+    case "fmv.s":
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "fsgnj.s", operands: [ops[0], ops[1], ops[1]] }];
+    case "fneg.s":
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "fsgnjn.s", operands: [ops[0], ops[1], ops[1]] }];
+    case "fabs.s":
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "fsgnjx.s", operands: [ops[0], ops[1], ops[1]] }];
     case "nop":
       return [
         { kind: EKind.INSTRUCTION, mnemonic: "addi", operands: [regOp("zero"), regOp("zero"), exprOp(numExpr(0))] },
@@ -654,7 +803,7 @@ function lowerPseudo(stmt: IStatement): IStatement[] | null {
     case "bgez":
       return [{ kind: EKind.INSTRUCTION, mnemonic: "bge", operands: [ops[0], regOp("zero"), ops[1]] }];
     case "bltz":
-      return [{ kind: EKind.INSTRUCTION, mnemonic: "blt", operands: [regOp("zero"), ops[0], ops[1]] }];
+      return [{ kind: EKind.INSTRUCTION, mnemonic: "blt", operands: [ops[0], regOp("zero"), ops[1]] }];
     case "bgtz":
       return [{ kind: EKind.INSTRUCTION, mnemonic: "blt", operands: [regOp("zero"), ops[0], ops[1]] }];
     case "bgt":
@@ -670,12 +819,12 @@ function lowerPseudo(stmt: IStatement): IStatement[] | null {
         {
           kind: EKind.INSTRUCTION,
           mnemonic: "auipc",
-          operands: [ops[0], exprOp({ kind: EKind.RELOC, op: "hi", arg: operandToExpr(ops[1]) })],
+          operands: [ops[0], exprOp({ kind: EKind.RELOC, op: "pcrel_hi", arg: operandToExpr(ops[1]) })],
         },
         {
           kind: EKind.INSTRUCTION,
           mnemonic: "addi",
-          operands: [ops[0], ops[0], exprOp({ kind: EKind.RELOC, op: "lo", arg: operandToExpr(ops[1]) })],
+          operands: [ops[0], ops[0], exprOp({ kind: EKind.RELOC, op: "pcrel_lo", arg: operandToExpr(ops[1]) })],
         },
       ];
     default:
@@ -683,14 +832,28 @@ function lowerPseudo(stmt: IStatement): IStatement[] | null {
   }
 }
 
-function analyzeInstructionStmt(ctx: IAnalyzeCtx, origin: number, parseLine: number, stmt: IStatement) {
+function analyzeInstructionStmt(ctx: IAnalyzeCtx, origin: number, parseLine: number, original: IStatement) {
+  let stmt = original;
   if (stmt.kind !== EKind.INSTRUCTION) return;
 
   let statements: IStatement[] = [stmt];
 
-  if (stmt.mnemonic === "li" && stmt.operands.length >= 2) {
+  const pseudoArity = PSEUDO_ARITY[stmt.mnemonic];
+  if (pseudoArity !== undefined && !checkArity(ctx, origin, stmt.mnemonic, stmt.operands.length, pseudoArity)) {
+    return;
+  }
+
+  if (stmt.mnemonic === "jal" && stmt.operands.length === 1) {
+    stmt = { ...stmt, operands: [regOp("ra"), stmt.operands[0]] };
+    statements = [stmt];
+  } else if (stmt.mnemonic === "jalr" && stmt.operands.length === 1) {
+    stmt = { ...stmt, operands: [regOp("ra"), stmt.operands[0], exprOp(numExpr(0))] };
+    statements = [stmt];
+  }
+
+  if (stmt.mnemonic === "li") {
     const immExpr = operandToExpr(stmt.operands[1]);
-    const imm = evalExpr(ctx, immExpr, origin);
+    const imm = resolveConstantOnly(ctx, immExpr, origin);
     if (imm !== null && imm >= -2048n && imm <= 2047n) {
       statements = [
         {
@@ -787,181 +950,182 @@ function analyzeRealInstruction(ctx: IAnalyzeCtx, origin: number, parseLine: num
     return true;
   };
 
-  if (data.extension === rv_ext.RV32I || data.extension === rv_ext.RV32M) {
-    switch (dec.codec) {
-      case rv_codec.r: {
-        const rd = resolveRegOperand(ctx, ops[0], origin);
-        const rs1 = resolveRegOperand(ctx, ops[1], origin);
-        const rs2 = resolveRegOperand(ctx, ops[2], origin);
-        if (rd === null || rs1 === null || rs2 === null) return;
-        dec.rd = rd;
-        dec.rs1 = rs1;
-        dec.rs2 = rs2;
-        break;
-      }
-      case rv_codec.i: {
-        if (opcode === rv_opcode.ecall || opcode === rv_opcode.ebreak) break;
-        if (ops[1]?.kind === EKind.MEM) {
-          const rd = resolveRegOperand(ctx, ops[0], origin);
-          const rs1 = resolveRegister(ctx, ops[1].base, origin);
-          if (rd === null || rs1 === null || !setImm(ops[1].offset)) return;
-          dec.rd = rd;
-          dec.rs1 = rs1;
-        } else {
+  if (!checkArity(ctx, origin, data.name, ops.length, realOperandArity(opcode, ops))) {
+    emitInstruction(ctx, origin, parseLine, dec);
+    return;
+  }
+
+  const decodeOperands = () => {
+    if (data.extension === rv_ext.RV32I || data.extension === rv_ext.RV32M) {
+      switch (dec.codec) {
+        case rv_codec.r: {
           const rd = resolveRegOperand(ctx, ops[0], origin);
           const rs1 = resolveRegOperand(ctx, ops[1], origin);
-          if (rd === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
+          const rs2 = resolveRegOperand(ctx, ops[2], origin);
+          if (rd === null || rs1 === null || rs2 === null) return;
           dec.rd = rd;
           dec.rs1 = rs1;
-        }
-        break;
-      }
-      case rv_codec.s: {
-        if (ops[1]?.kind === EKind.MEM) {
-          const rs2 = resolveRegOperand(ctx, ops[0], origin);
-          const rs1 = resolveRegister(ctx, ops[1].base, origin);
-          if (rs2 === null || rs1 === null || !setImm(ops[1].offset)) return;
           dec.rs2 = rs2;
-          dec.rs1 = rs1;
-        } else if (ops[0]?.kind === EKind.MEM) {
-          const rs1 = resolveRegister(ctx, ops[0].base, origin);
+          break;
+        }
+        case rv_codec.i: {
+          if (opcode === rv_opcode.ecall || opcode === rv_opcode.ebreak) break;
+          if (ops[1]?.kind === EKind.MEM) {
+            const rd = resolveRegOperand(ctx, ops[0], origin);
+            const rs1 = resolveRegister(ctx, ops[1].base, origin);
+            if (rd === null || rs1 === null || !setImm(ops[1].offset)) return;
+            dec.rd = rd;
+            dec.rs1 = rs1;
+          } else {
+            const rd = resolveRegOperand(ctx, ops[0], origin);
+            const rs1 = resolveRegOperand(ctx, ops[1], origin);
+            if (rd === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
+            dec.rd = rd;
+            dec.rs1 = rs1;
+          }
+          break;
+        }
+        case rv_codec.s: {
+          if (ops[1]?.kind === EKind.MEM) {
+            const rs2 = resolveRegOperand(ctx, ops[0], origin);
+            const rs1 = resolveRegister(ctx, ops[1].base, origin);
+            if (rs2 === null || rs1 === null || !setImm(ops[1].offset)) return;
+            dec.rs2 = rs2;
+            dec.rs1 = rs1;
+          } else if (ops[0]?.kind === EKind.MEM) {
+            const rs1 = resolveRegister(ctx, ops[0].base, origin);
+            const rs2 = resolveRegOperand(ctx, ops[1], origin);
+            if (rs1 === null || rs2 === null || !setImm(ops[0].offset)) return;
+            dec.rs1 = rs1;
+            dec.rs2 = rs2;
+          } else {
+            const rs2 = resolveRegOperand(ctx, ops[0], origin);
+            const rs1 = resolveRegOperand(ctx, ops[1], origin);
+            if (rs2 === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
+            dec.rs2 = rs2;
+            dec.rs1 = rs1;
+          }
+          break;
+        }
+        case rv_codec.b: {
+          const rs1 = resolveRegOperand(ctx, ops[0], origin);
           const rs2 = resolveRegOperand(ctx, ops[1], origin);
-          if (rs1 === null || rs2 === null || !setImm(ops[0].offset)) return;
+          if (rs1 === null || rs2 === null || !setImm(immExprFromOperand(ops[2]))) return;
           dec.rs1 = rs1;
           dec.rs2 = rs2;
-        } else {
-          const rs2 = resolveRegOperand(ctx, ops[0], origin);
-          const rs1 = resolveRegOperand(ctx, ops[1], origin);
-          if (rs2 === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
-          dec.rs2 = rs2;
-          dec.rs1 = rs1;
+          break;
         }
-        break;
+        case rv_codec.u:
+        case rv_codec.j: {
+          const rd = resolveRegOperand(ctx, ops[0], origin);
+          if (rd === null || !setImm(immExprFromOperand(ops[1]))) return;
+          dec.rd = rd;
+          break;
+        }
       }
-      case rv_codec.b: {
-        const rs1 = resolveRegOperand(ctx, ops[0], origin);
-        const rs2 = resolveRegOperand(ctx, ops[1], origin);
-        if (rs1 === null || rs2 === null || !setImm(immExprFromOperand(ops[2]))) return;
-        dec.rs1 = rs1;
-        dec.rs2 = rs2;
-        break;
-      }
-      case rv_codec.u:
-      case rv_codec.j: {
-        const rd = resolveRegOperand(ctx, ops[0], origin);
-        if (rd === null || !setImm(immExprFromOperand(ops[1]))) return;
-        dec.rd = rd;
-        break;
-      }
-    }
-  } else if (data.extension === rv_ext.RV32F) {
-    switch (dec.codec) {
-      case rv_codec.r: {
-        const rdKind = [
-          rv_opcode["fcvt.w.s"],
-          rv_opcode["fcvt.wu.s"],
-          rv_opcode["fmv.x.w"],
-          rv_opcode["feq.s"],
-          rv_opcode["flt.s"],
-          rv_opcode["fle.s"],
-          rv_opcode["fclass.s"],
-        ].includes(opcode)
-          ? rv_reg
-          : rv_reg_f;
-        const rs1Kind = [rv_opcode["fmv.w.x"], rv_opcode["fcvt.s.w"], rv_opcode["fcvt.s.wu"]].includes(opcode)
-          ? rv_reg
-          : rv_reg_f;
-        const rd = resolveRegOperand(ctx, ops[0], origin, rdKind);
-        const rs1 = resolveRegOperand(ctx, ops[1], origin, rs1Kind);
-        if (rd === null || rs1 === null) return;
-        dec.rd = rd;
-        dec.rs1 = rs1;
-        if (
-          [
-            rv_opcode["fsqrt.s"],
+    } else if (data.extension === rv_ext.RV32F) {
+      switch (dec.codec) {
+        case rv_codec.r: {
+          const rdKind = [
             rv_opcode["fcvt.w.s"],
             rv_opcode["fcvt.wu.s"],
             rv_opcode["fmv.x.w"],
+            rv_opcode["feq.s"],
+            rv_opcode["flt.s"],
+            rv_opcode["fle.s"],
             rv_opcode["fclass.s"],
-            rv_opcode["fcvt.s.w"],
-            rv_opcode["fcvt.s.wu"],
-            rv_opcode["fmv.w.x"],
           ].includes(opcode)
-        ) {
-          dec.rs2 = 0;
-        } else {
+            ? rv_reg
+            : rv_reg_f;
+          const rs1Kind = [rv_opcode["fmv.w.x"], rv_opcode["fcvt.s.w"], rv_opcode["fcvt.s.wu"]].includes(opcode)
+            ? rv_reg
+            : rv_reg_f;
+          const rd = resolveRegOperand(ctx, ops[0], origin, rdKind);
+          const rs1 = resolveRegOperand(ctx, ops[1], origin, rs1Kind);
+          if (rd === null || rs1 === null) return;
+          dec.rd = rd;
+          dec.rs1 = rs1;
+          if (F_UNARY_OPS.has(opcode)) {
+            dec.rs2 = 0;
+          } else {
+            const rs2 = resolveRegOperand(ctx, ops[2], origin, rv_reg_f);
+            if (rs2 === null) return;
+            dec.rs2 = rs2;
+          }
+          break;
+        }
+        case rv_codec.i: {
+          const rd = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
+          if (ops[1]?.kind === EKind.MEM) {
+            const rs1 = resolveRegister(ctx, ops[1].base, origin);
+            if (rd === null || rs1 === null || !setImm(ops[1].offset)) return;
+            dec.rd = rd;
+            dec.rs1 = rs1;
+          } else {
+            const rs1 = resolveRegOperand(ctx, ops[1], origin);
+            if (rd === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
+            dec.rd = rd;
+            dec.rs1 = rs1;
+          }
+          break;
+        }
+        case rv_codec.s: {
+          if (ops[1]?.kind === EKind.MEM) {
+            const rs2 = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
+            const rs1 = resolveRegister(ctx, ops[1].base, origin);
+            if (rs2 === null || rs1 === null || !setImm(ops[1].offset)) return;
+            dec.rs2 = rs2;
+            dec.rs1 = rs1;
+          } else {
+            const rs2 = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
+            const rs1 = resolveRegOperand(ctx, ops[1], origin);
+            if (rs2 === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
+            dec.rs2 = rs2;
+            dec.rs1 = rs1;
+          }
+          break;
+        }
+        case rv_codec.r4: {
+          const rd = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
+          const rs1 = resolveRegOperand(ctx, ops[1], origin, rv_reg_f);
           const rs2 = resolveRegOperand(ctx, ops[2], origin, rv_reg_f);
-          if (rs2 === null) return;
-          dec.rs2 = rs2;
-        }
-        break;
-      }
-      case rv_codec.i: {
-        const rd = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
-        if (ops[1]?.kind === EKind.MEM) {
-          const rs1 = resolveRegister(ctx, ops[1].base, origin);
-          if (rd === null || rs1 === null || !setImm(ops[1].offset)) return;
+          const rs3 = resolveRegOperand(ctx, ops[3], origin, rv_reg_f);
+          if (rd === null || rs1 === null || rs2 === null || rs3 === null) return;
           dec.rd = rd;
           dec.rs1 = rs1;
-        } else {
-          const rs1 = resolveRegOperand(ctx, ops[1], origin);
-          if (rd === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
-          dec.rd = rd;
-          dec.rs1 = rs1;
-        }
-        break;
-      }
-      case rv_codec.s: {
-        if (ops[1]?.kind === EKind.MEM) {
-          const rs2 = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
-          const rs1 = resolveRegister(ctx, ops[1].base, origin);
-          if (rs2 === null || rs1 === null || !setImm(ops[1].offset)) return;
           dec.rs2 = rs2;
-          dec.rs1 = rs1;
-        } else {
-          const rs2 = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
-          const rs1 = resolveRegOperand(ctx, ops[1], origin);
-          if (rs2 === null || rs1 === null || !setImm(immExprFromOperand(ops[2]))) return;
-          dec.rs2 = rs2;
-          dec.rs1 = rs1;
+          dec.rs3 = rs3;
+          // @todo rounding mode
+          dec.rm = 0b111;
+          break;
         }
-        break;
-      }
-      case rv_codec.r4: {
-        const rd = resolveRegOperand(ctx, ops[0], origin, rv_reg_f);
-        const rs1 = resolveRegOperand(ctx, ops[1], origin, rv_reg_f);
-        const rs2 = resolveRegOperand(ctx, ops[2], origin, rv_reg_f);
-        const rs3 = resolveRegOperand(ctx, ops[3], origin, rv_reg_f);
-        if (rd === null || rs1 === null || rs2 === null || rs3 === null) return;
-        dec.rd = rd;
-        dec.rs1 = rs1;
-        dec.rs2 = rs2;
-        dec.rs3 = rs3;
-        // @todo rounding mode
-        dec.rm = 0b111;
-        break;
       }
     }
-  }
+  };
 
+  decodeOperands();
   emitInstruction(ctx, origin, parseLine, dec, pending);
 }
 
 function analyzeDirective(ctx: IAnalyzeCtx, line: number, stmt: IStatement) {
   if (stmt.kind !== EKind.DIRECTIVE) return;
 
+  if (![".equ", ".option", ".global", ".globl"].includes(stmt.name)) {
+    bindPendingLabels(ctx);
+  }
+
   switch (stmt.name) {
+    case ".globl":
+    case ".global":
+      // intentionally left blank
+      return;
     case ".text":
-      ctx.addr = ctx.regions.PC_START;
-      return;
     case ".data":
-      ctx.addr = ctx.regions.DATA_START;
-      return;
     case ".rodata":
-      ctx.addr = ctx.regions.RODATA_START;
-      return;
     case ".bss":
-      ctx.addr = ctx.regions.BSS_START;
+      ctx.sectionAddr[ctx.section] = ctx.addr;
+      ctx.section = stmt.name;
+      ctx.addr = ctx.sectionAddr[stmt.name];
       return;
     case ".equ": {
       const nameArg = stmt.args[0];
@@ -992,7 +1156,10 @@ function analyzeDirective(ctx: IAnalyzeCtx, line: number, stmt: IStatement) {
         }
 
         const val = resolveNumeric(ctx, arg, line);
-        if (val === null) continue;
+        if (val === null) {
+          values.push(0n);
+          continue;
+        }
 
         checkDataRange(ctx, line, stmt.name, width, val, exprSymbol(arg));
         values.push(val);
@@ -1005,11 +1172,15 @@ function analyzeDirective(ctx: IAnalyzeCtx, line: number, stmt: IStatement) {
 
       return;
     }
+    case ".zero":
     case ".space": {
       const size = stmt.args[0] && stmt.args[0].kind !== EKind.STRING ? resolveNumeric(ctx, stmt.args[0], line) : null;
 
       if (size === null) {
-        pushError(ctx, line, "Invalid .space directive");
+        pushError(ctx, line, `Invalid ${stmt.name} directive`);
+        return;
+      } else if (size < 0n) {
+        pushError(ctx, line, `${stmt.name} size cannot be negative (${size})`);
         return;
       }
 
@@ -1057,24 +1228,29 @@ function analyzeDirective(ctx: IAnalyzeCtx, line: number, stmt: IStatement) {
     case ".string":
     case ".ascii":
     case ".asciz": {
-      const arg = stmt.args[0];
-
-      if (!arg || arg.kind !== EKind.STRING) {
+      if (stmt.args.length === 0) {
         pushError(ctx, line, "Expected string literal");
         return;
       }
 
-      const bytes = [...arg.value].map((c) => c.charCodeAt(0));
+      for (const arg of stmt.args) {
+        if (arg.kind !== EKind.STRING) {
+          pushError(ctx, line, "Expected string literal");
+          continue;
+        }
 
-      ctx.units.push({
-        kind: "string",
-        line,
-        address: ctx.addr,
-        bytes,
-        zeroTerminated: stmt.name !== ".ascii",
-      });
+        const bytes = [...arg.value].map((c) => c.charCodeAt(0) & 0xff);
 
-      ctx.addr += BigInt(bytes.length + (stmt.name === ".ascii" ? 0 : 1));
+        ctx.units.push({
+          kind: "string",
+          line,
+          address: ctx.addr,
+          bytes,
+          zeroTerminated: stmt.name !== ".ascii",
+        });
+
+        ctx.addr += BigInt(bytes.length + (stmt.name === ".ascii" ? 0 : 1));
+      }
 
       return;
     }
@@ -1095,15 +1271,15 @@ function analyzeDirective(ctx: IAnalyzeCtx, line: number, stmt: IStatement) {
 
 function registerLabel(ctx: IAnalyzeCtx, line: number, rawLabel: string) {
   const name = qualifyLabel(rawLabel, ctx.scope);
-  if (ctx.labels[name] !== undefined) {
+  if (ctx.definedLabels.has(name)) {
     pushError(ctx, line, "Label already defined", rawLabel);
     return;
   }
 
-  ctx.labels[name] = alignAddr(ctx.addr);
+  ctx.definedLabels.add(name);
+  ctx.pendingLabels.push(name);
 
   if (!rawLabel.startsWith(".")) {
-    ctx.globalLabel = rawLabel;
     ctx.scope = rawLabel;
   }
 }
@@ -1120,7 +1296,17 @@ function analyzeLine(ctx: IAnalyzeCtx, sourceLine: ILine) {
     return;
   }
 
+  if (!sourceLine.hasErrors) {
+    analyzeInstructionStmt(ctx, sourceLine.origin, sourceLine.line, sourceLine.stmt);
+    return;
+  }
+
+  const { errors, warnings } = ctx;
+  ctx.errors = [];
+  ctx.warnings = [];
   analyzeInstructionStmt(ctx, sourceLine.origin, sourceLine.line, sourceLine.stmt);
+  ctx.errors = errors;
+  ctx.warnings = warnings;
 }
 
 function resolvePendingFixups(ctx: IAnalyzeCtx) {
@@ -1150,14 +1336,19 @@ function resolvePendingFixups(ctx: IAnalyzeCtx) {
         decoded.imm = labelAddr - address;
       } else if (pending.codec === rv_codec.u) {
         decoded.imm = (labelAddr >> 12n) & 0xfffffn;
-      } else if (pending.codec === rv_codec.i) {
+      } else if (pending.codec === rv_codec.i || pending.codec === rv_codec.s) {
         decoded.imm = labelAddr;
       }
 
       if (pending.codec !== rv_codec.u) {
         const isLocal = unit.scope !== "" && pending.sym.startsWith(`${unit.scope}.`);
         const symbol = isLocal ? pending.sym.slice(unit.scope.length) : pending.sym;
-        checkImmediateRange(ctx, line, decoded._op, pending.codec, decoded.imm, symbol, pending.codec === rv_codec.i);
+        const isAddress = pending.codec === rv_codec.i || pending.codec === rv_codec.s;
+        checkImmediateRange(ctx, line, decoded._op, pending.codec, decoded.imm, symbol, isAddress);
+      }
+
+      if (pending.codec === rv_codec.i || pending.codec === rv_codec.s) {
+        decoded.imm &= 0xfffn;
       }
     }
 
@@ -1166,7 +1357,13 @@ function resolvePendingFixups(ctx: IAnalyzeCtx) {
   }
 }
 
-export function analyze(parseResult: IParseResult): IAnalyzeResult {
+const MAX_LAYOUT_PASSES = 8;
+
+function runPass(
+  parseResult: IParseResult,
+  knownLabels: Record<string, bigint>,
+  knownEqu: Record<string, IEquEntry>
+): IAnalyzeCtx {
   const regions = defaultMemoryRegions();
 
   const ctx: IAnalyzeCtx = {
@@ -1174,16 +1371,49 @@ export function analyze(parseResult: IParseResult): IAnalyzeResult {
     errors: [],
     warnings: [],
     equ: {},
-    labels: {},
+    knownEqu,
+    labels: { ...knownLabels },
+    definedLabels: new Set(),
+    pendingLabels: [],
     units: [],
     addr: regions.PC_START,
+    section: ".text",
+    sectionAddr: {
+      ".text": regions.PC_START,
+      ".data": regions.DATA_START,
+      ".rodata": regions.RODATA_START,
+      ".bss": regions.BSS_START,
+    },
     scope: "",
-    globalLabel: "",
     optExplicitScreenUpdate: false,
   };
 
   for (const line of parseResult.program.lines) {
     analyzeLine(ctx, line);
+  }
+
+  bindPendingLabels(ctx);
+
+  for (const name of Object.keys(ctx.labels)) {
+    if (!ctx.definedLabels.has(name)) delete ctx.labels[name];
+  }
+
+  return ctx;
+}
+
+function sameLabels(a: Record<string, bigint>, b: Record<string, bigint>) {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+}
+
+export function analyze(parseResult: IParseResult): IAnalyzeResult {
+  let ctx = runPass(parseResult, {}, {});
+
+  for (let pass = 1; pass < MAX_LAYOUT_PASSES; pass++) {
+    const next = runPass(parseResult, ctx.labels, ctx.equ);
+    const stable = sameLabels(ctx.labels, next.labels);
+    ctx = next;
+    if (stable) break;
   }
 
   resolvePendingFixups(ctx);

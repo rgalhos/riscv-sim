@@ -32,6 +32,7 @@ export type ILine = {
   origin: number;
   label?: string;
   stmt?: IStatement;
+  hasErrors: boolean;
 };
 
 export type IStatement =
@@ -358,6 +359,7 @@ function parseDirective(state: IParserState): IStatement | null {
         skipToEnd(state);
         return null;
       }
+      skipCommas(state);
       const value = parseExpr(state);
       if (!value) {
         skipToEnd(state);
@@ -372,9 +374,12 @@ function parseDirective(state: IParserState): IStatement | null {
     case ".rodata":
       return { kind: EKind.DIRECTIVE, name, args: [] };
 
+    case ".globl": // does nothing, just supress errors
+    case ".global": // does nothing, just supress errors
     case ".byte":
     case ".half":
     case ".word":
+    case ".zero":
     case ".space":
     case ".org":
     case ".align":
@@ -441,7 +446,7 @@ function parseLine(tokens: IToken[]): { line: ILine; errors: Error[] } {
     }
   }
 
-  return { line: { line, origin, label, stmt }, errors: state.errors };
+  return { line: { line, origin, label, stmt, hasErrors: state.errors.length > 0 }, errors: state.errors };
 }
 
 export function parse(tokens: IToken[]): IParseResult {

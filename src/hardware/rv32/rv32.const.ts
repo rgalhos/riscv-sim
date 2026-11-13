@@ -322,7 +322,7 @@ export enum rv_opcode_pseudo {
   bnez, // bne rs1, zero, offset
   blez, // bge zero, rs1, offset
   bgez, // bge rs1, zero, offset
-  bltz, // blt zero, rs1, offset
+  bltz, // blt rs1, zero, offset
   bgtz, // blt zero, rs1, offset
   bgt, // blt rs2, rs1, offset
   ble, // bge rs2, rs1, offset
@@ -330,6 +330,14 @@ export enum rv_opcode_pseudo {
   bleu, // bgeu  rs2, rs1, offset
   call, // call offset -> auipc ra, %hi(offset) + jalr %lo(offset)(ra) // call rt, offset -> auipc rt, %hi(offset) + jalr %lo(offset)(rt)
   ret, // jalr zero, ra, 0
+  jr,
+  sgt,
+  sgtu,
+
+  // RV32F
+  'fmv.s',
+  'fneg.s',
+  'fabs.s',
 }
 
 export enum rv_f_rm {
@@ -360,6 +368,9 @@ export enum rv_directives {
   '.rodata',
   '.align',
   '.p2align',
+  '.globl',
+  '.global',
+  '.zero',
   '.macro',
   '.endmacro',
   '%hi',
@@ -494,7 +505,7 @@ export const RV_OPCODE_DATA = [
   { name: 'remu',    codec: rv_codec.r, format: RV_CODEC_FORMAT[rv_codec.r], opcode: 0b0110011, funct3: 0b111, funct7: 0b0000001, extension: rv_ext.RV32M },
 
   // RV32F
-  { name: 'flw',       codec: rv_codec.i,  format: RV_CODEC_FORMAT[rv_codec.s],  opcode: 0b0000111, funct3: 0b010, funct7: 0b00000, extension: rv_ext.RV32F },
+  { name: 'flw',       codec: rv_codec.i,  format: RV_CODEC_FORMAT['load_store'],  opcode: 0b0000111, funct3: 0b010, funct7: 0b00000, extension: rv_ext.RV32F },
   { name: 'fsw',       codec: rv_codec.s,  format: RV_CODEC_FORMAT[rv_codec.s],  opcode: 0b0100111, funct3: 0b010, funct7: 0b00000, extension: rv_ext.RV32F },
   { name: 'fmadd.s',   codec: rv_codec.r4, format: RV_CODEC_FORMAT[rv_codec.r4], opcode: 0b1000011, funct3: 0b000, funct7: 0b00000, extension: rv_ext.RV32F },
   { name: 'fmsub.s',   codec: rv_codec.r4, format: RV_CODEC_FORMAT[rv_codec.r4], opcode: 0b1000111, funct3: 0b000, funct7: 0b00000, extension: rv_ext.RV32F },

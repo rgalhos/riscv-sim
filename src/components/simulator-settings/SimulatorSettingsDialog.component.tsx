@@ -5,7 +5,7 @@ import { Field, FieldGroup } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSimulator } from "@/lib/contexts/simulator.context";
-import { $settings } from "@/lib/stores/settings.store";
+import { $settings, MAX_STEP_SPEED, sanitizeStepSpeed } from "@/lib/stores/settings.store";
 import { useStore } from "@nanostores/react";
 import { useRef, useState, type JSX } from "react";
 
@@ -19,22 +19,20 @@ export function SimulatorSettingsDialog({ open, onClose }: { open: boolean; onCl
   const onSubmit = (e: Parameters<Exclude<JSX.IntrinsicElements["form"]["onSubmit"], undefined>>[0]) => {
     e.preventDefault();
 
-    const stepSpeed = parseInt(stepSpeedInputRef.current!.value, 10);
+    const stepSpeed = sanitizeStepSpeed(stepSpeedInputRef.current!.value);
 
     $settings.set({
       stepSpeed,
       focusOnStep: focusStepChecked,
     });
 
-    if (simulator.workerService.worker) {
-      simulator.workerService.setFrequency(stepSpeed);
-    }
+    simulator.setFrequency(stepSpeed);
 
     onClose();
   };
 
   return (
-    <Dialog open={open}>
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <form id="rvsim-settings" onSubmit={onSubmit}>
         <DialogContent className="sm:max-w-sm" showCloseButton={false}>
           <DialogHeader>
@@ -42,8 +40,18 @@ export function SimulatorSettingsDialog({ open, onClose }: { open: boolean; onCl
           </DialogHeader>
           <FieldGroup>
             <Field>
-              <Label htmlFor="name-1">Simulation speed (Hz)</Label>
-              <Input id="speed" name="speed" type="number" defaultValue={settings.stepSpeed} ref={stepSpeedInputRef} />
+              <Label htmlFor="speed">Simulation speed (Hz)</Label>
+              <Input
+                id="speed"
+                name="speed"
+                type="number"
+                min={1}
+                max={MAX_STEP_SPEED}
+                step={1}
+                required
+                defaultValue={sanitizeStepSpeed(settings.stepSpeed)}
+                ref={stepSpeedInputRef}
+              />
             </Field>
             <Field orientation="horizontal">
               <Checkbox

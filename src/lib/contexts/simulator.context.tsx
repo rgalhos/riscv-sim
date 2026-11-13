@@ -1,7 +1,7 @@
 import type { ISimulator } from "@/hardware/common/simulator";
 import { RVSimulator } from "@/hardware/rv32/rv32.simulator";
-import { $settings } from "@/lib/stores/settings.store";
-import { createContext, useCallback, useContext, useState } from "react";
+import { getStepSpeed } from "@/lib/stores/settings.store";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 
 const SimulatorContext = createContext(
   {} as {
@@ -12,25 +12,27 @@ const SimulatorContext = createContext(
 );
 
 export const SimulatorProvider = ({ children }: { children: React.ReactNode }) => {
-  const [simulator, setSimulator] = useState<ISimulator>(new RVSimulator());
+  const [simulator, setSimulator] = useState<ISimulator>(() => {
+    const sim = new RVSimulator();
+    sim.processor.setFrequency(getStepSpeed());
+    return sim;
+  });
 
   const createSimulatorWorker = useCallback(() => {
     if (!simulator.workerService.worker) {
       simulator.createCpuWorker();
       simulator.workerService.requestCpuDump();
-
-      queueMicrotask(() => simulator.workerService.setFrequency($settings.get().stepSpeed));
+      simulator.setFrequency(getStepSpeed());
     }
   }, [simulator]);
 
+  const value = useMemo(
+    () => ({ simulator, setSimulator, createSimulatorWorker }),
+    [simulator, createSimulatorWorker]
+  );
+
   return (
-    <SimulatorContext.Provider
-      value={{
-        simulator,
-        setSimulator,
-        createSimulatorWorker,
-      }}
-    >
+    <SimulatorContext.Provider value={value}>
       {children}
     </SimulatorContext.Provider>
   );

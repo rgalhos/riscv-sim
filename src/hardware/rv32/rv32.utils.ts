@@ -153,6 +153,10 @@ export function encodeRType_RV32F(op: rv_opcode, rd: bigint, rs1: bigint, rs2: b
 }
 
 export function encodeIType(op: rv_opcode, rd: bigint, rs1: bigint, imm: bigint): bigint {
+  if (op === rv_opcode.slli || op === rv_opcode.srli || op === rv_opcode.srai) {
+    imm = (imm & 0x1fn) | (BigInt(RV_OPCODE_DATA[op].funct7 ?? 0) << 5n);
+  }
+
   const imm12 = pack_i_imm12(imm) << 20n;
   const opcode = BigInt(RV_OPCODE_DATA[op].opcode || 0);
   if (!opcode) return 0n;

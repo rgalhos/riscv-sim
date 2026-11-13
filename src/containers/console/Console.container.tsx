@@ -8,6 +8,7 @@ import { Trash2 } from "lucide-react";
 import { type KeyboardEvent, memo, useEffect, useRef, useState } from "react";
 
 const STDIN_MAX_LEN = 255;
+const TERMINAL_MAX_CHARS = 100_000;
 
 const enum ETabs {
   TERMINAL,
@@ -60,15 +61,37 @@ const ConsoleTerminal = memo(function MemoConsoleTerminal({ simulator }: { simul
   }
 
   useEffect(() => {
-    const onMessage = (response: Extract<WorkerMessageResponse, { command: EWorkerCommand.TERMINAL_PRINT }>) => {
-      setTerminalValue((prev) => prev + response.data);
+    let pending = "";
+    let frame: number | null = null;
+
+    const flush = () => {
+      frame = null;
+      const chunk = pending;
+      pending = "";
+      setTerminalValue((prev) => {
+        const next = prev + chunk;
+        return next.length > TERMINAL_MAX_CHARS ? next.slice(next.length - TERMINAL_MAX_CHARS) : next;
+      });
     };
 
-    simulator.workerService.on(EWorkerCommand.CPU_RESET, handleClearTerminal);
+    const onMessage = (response: Extract<WorkerMessageResponse, { command: EWorkerCommand.TERMINAL_PRINT }>) => {
+      pending += response.data;
+      if (frame === null) frame = requestAnimationFrame(flush);
+    };
+
+    const onReset = () => {
+      pending = "";
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+      handleClearTerminal();
+    };
+
+    simulator.workerService.on(EWorkerCommand.CPU_RESET, onReset);
     simulator.workerService.on(EWorkerCommand.TERMINAL_PRINT, onMessage);
 
     return () => {
-      simulator.workerService.off(EWorkerCommand.CPU_RESET, handleClearTerminal);
+      if (frame !== null) cancelAnimationFrame(frame);
+      simulator.workerService.off(EWorkerCommand.CPU_RESET, onReset);
       simulator.workerService.off(EWorkerCommand.TERMINAL_PRINT, onMessage);
     };
   }, [simulator]);

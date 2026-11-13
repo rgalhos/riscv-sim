@@ -580,6 +580,7 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
         dec.rd = operand_rd(bytecode);
         dec.rs1 = operand_rs1(bytecode);
         dec.imm = operand_iimm12(bytecode);
+        if (op === rv_opcode.slli || op === rv_opcode.srli || op === rv_opcode.srai) dec.imm &= 0x1fn;
         break;
       case rv_codec.s:
         dec.rs1 = operand_rs1(bytecode);
@@ -616,7 +617,7 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
   }
 
   public fetch() {
-    if (this.cpu.pc - 4n >= this.memory.length) {
+    if (this.cpu.pc + 4n > BigInt(this.memory.length)) {
       return 0xf00fffffn;
     }
 
@@ -783,8 +784,13 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
         let ret = rv_worker_commands.NONE;
 
         if (syscall === rv_syscalls.syscall_fill_screen) {
-          const a0 = Number(this.registerRead(rv_reg.a0));
-          this.memory.fill(a0, Number(this.FB_START), Number(this.FB_END));
+          const color = Number(this.registerRead(rv_reg.a0) & 0xffn);
+          const end = Math.min(Number(this.FB_END) + 1, this.memory.length);
+
+          for (let addr = Number(this.FB_START); addr < end; addr++) {
+            this.recordMemoryUndo(addr, this.memory[addr]);
+            this._memoryOperationDiff[addr] = this.memory[addr] = color;
+          }
 
           ret = rv_worker_commands.SYNC_LISTENERS;
         } else if (syscall === rv_syscalls.syscall_update_screen) {
@@ -799,6 +805,10 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
 
           const str = String.fromCharCode(...memory.slice(0, nulIdx));
           this._workerBuffer = str;
+
+          ret = rv_worker_commands.PRINT_STRING;
+        } else if (syscall === rv_syscalls.syscall_print_char) {
+          this._workerBuffer = String.fromCharCode(Number(this.registerRead(rv_reg.a0) & 0xffn));
 
           ret = rv_worker_commands.PRINT_STRING;
         } else if (syscall === rv_syscalls.syscall_printf) {
@@ -989,10 +999,11 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
 
     // RV32F
     switch (d._op) {
-      case rv_opcode.flw:
+      case rv_opcode.flw: {
         const addr = u32(v1 + d.imm);
         this.registerWriteF(d.rd, u32(this.memoryRead(addr, 32)));
         return;
+      }
       case rv_opcode.fsw:
         this.memoryWrite(u32(v1 + d.imm), vf2, 32);
         return;
@@ -1390,14 +1401,17 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
     }
 
     this._pcWritten = false;
-    const ret = this.execute(dec);
-    if (!this._pcWritten) {
-      this.cpu.pc += 4n;
+
+    try {
+      const ret = this.execute(dec);
+      if (!this._pcWritten) {
+        this.cpu.pc += 4n;
+      }
+
+      return ret;
+    } finally {
+      this.commitUndoFrame();
     }
-
-    this.commitUndoFrame();
-
-    return ret;
   }
 
   protected beginUndoFrame() {
@@ -1456,13 +1470,18 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
           str += rv_reg_f[rd];
         }
       } else if (c === "1") {
-        if (rv32im || [rv_opcode["fmv.w.x"], rv_opcode["fcvt.s.w"], rv_opcode["fcvt.s.wu"]].includes(opcode)) {
+        if (
+          rv32im ||
+          [rv_opcode["fmv.w.x"], rv_opcode["fcvt.s.w"], rv_opcode["fcvt.s.wu"], rv_opcode.flw, rv_opcode.fsw].includes(
+            opcode
+          )
+        ) {
           str += rv_reg[rs1];
         } else if (rv32f) {
           str += rv_reg_f[rs1];
         }
       } else if (c === "2") {
-        if (rv32im || rv_opcode.flw === opcode) {
+        if (rv32im) {
           str += rv_reg[rs2];
         } else if (rv32f) {
           str += rv_reg_f[rs2];
@@ -1475,7 +1494,9 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
         }
       } else if (c === "i") {
         const bc = instruction.bytecode ?? 0n;
-        if (op_info.codec === rv_codec.i) {
+        if (opcode === rv_opcode.slli || opcode === rv_opcode.srli || opcode === rv_opcode.srai) {
+          str += operand_iimm12(bc) & 0x1fn;
+        } else if (op_info.codec === rv_codec.i) {
           str += operand_iimm12(bc);
         } else if (op_info.codec === rv_codec.s) {
           str += operand_simm12(bc);
@@ -1514,7 +1535,9 @@ export class RVProcessor extends IProcessor<IDecodedRVInstruction> {
 
   protected registerWrite(reg: number, value: bigint) {
     if (reg === rv_reg.sp && value > this.STACK_START) {
-      throw new Error(`stack overflow; register[sp] (${value}) > STACK_START (${value})`);
+      throw new Error(
+        `stack underflow: sp (0x${value.toString(16)}) is above the top of the stack (0x${this.STACK_START.toString(16)})`
+      );
     }
 
     if (reg !== rv_reg.zero) {

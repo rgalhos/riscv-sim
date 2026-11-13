@@ -264,7 +264,7 @@ describe("RV32 parser", () => {
 
   describe("labels", () => {
     test("parses label-only line", () => {
-      expect(parseRaw("main:").line).toEqual({ line: 1, origin: 1, label: "main" });
+      expect(parseRaw("main:").line).toEqual({ line: 1, origin: 1, label: "main", hasErrors: false });
     });
 
     test("parses local label reference as symbol operand", () => {
@@ -275,7 +275,7 @@ describe("RV32 parser", () => {
     });
 
     test("parses numeric local label declaration", () => {
-      expect(parseRaw("1:").line).toEqual({ line: 1, origin: 1, label: "1" });
+      expect(parseRaw("1:").line).toEqual({ line: 1, origin: 1, label: "1", hasErrors: false });
     });
 
     test("parses label and instruction on the same source line", () => {

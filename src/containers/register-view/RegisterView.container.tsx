@@ -2,7 +2,7 @@ import type { IRegisterReadable } from "@/hardware/common/processor";
 import { EWorkerCommand, type WorkerMessageResponse } from "@/hardware/common/worker-service";
 import { useSimulator } from "@/lib/contexts/simulator.context";
 import { fmtWordHex } from "@/lib/utils";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 const RegisterRow = memo(
   function MemoRegisterRow({
@@ -26,25 +26,24 @@ const RegisterRow = memo(
 function MemoRegisterViewContainer() {
   const { simulator } = useSimulator();
   const [toBlink, setToBlink] = useState<Record<string, 1>>({});
-  const [registers, setRegisters] = useState<IRegisterReadable>(
+  const [registers, setRegisters] = useState<IRegisterReadable>(() =>
     simulator.processor.getRegistersReadable(simulator.processor.cpu)
   );
+  const registersRef = useRef(registers);
 
   const onDump = useCallback(
     (response: Extract<WorkerMessageResponse, { command: EWorkerCommand.CPU_DUMP }>) => {
-      setRegisters((prev) => {
-        const next = response.data.cpu;
-        const nextFriendly = simulator.processor.getRegistersReadable(next);
-        const blink: Record<string, 1> = {};
+      const prev = registersRef.current;
+      const next = simulator.processor.getRegistersReadable(response.data.cpu);
+      const blink: Record<string, 1> = {};
 
-        for (const [reg, v] of Object.entries(nextFriendly)) {
-          if (prev[reg].value !== v.value) blink[reg] = 1;
-        }
+      for (const [reg, v] of Object.entries(next)) {
+        if (prev[reg]?.value !== v.value) blink[reg] = 1;
+      }
 
-        setToBlink(blink);
-
-        return simulator.processor.getRegistersReadable(next);
-      });
+      registersRef.current = next;
+      setRegisters(next);
+      setToBlink(blink);
     },
     [simulator.processor]
   );

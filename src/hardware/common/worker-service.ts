@@ -207,7 +207,7 @@ export class WorkerService extends EventEmitter {
   }
 
   setMemorySize(size: number) {
-    this._postMessage({ command: EWorkerCommand.SET_FREQUENCY, data: size } as WorkerMessage);
+    this._postMessage({ command: EWorkerCommand.SET_MEMORY_SIZE, data: size } as WorkerMessage);
   }
 
   requestCpuDump() {

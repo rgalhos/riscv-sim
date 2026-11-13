@@ -59,12 +59,38 @@ function shouldPostDumpAfterStep() {
   return true;
 }
 
+let runGeneration = 0;
+
 const cancelRunLoop = () => {
+  runGeneration++;
   cpu.setHalted(true);
 };
 
+const reportCpuFault = (error: unknown) => {
+  cpu.setHalted(true);
+
+  const message = error instanceof Error ? error.message : String(error);
+  const report = `[cpu halted at pc=0x${cpu.cpu.pc.toString(16)}] ${message}`;
+
+  console.log(report);
+
+  postMessage({
+    command: EWorkerCommand.TERMINAL_PRINT,
+    data: `\n${report}\n`,
+  });
+
+  postCpuDump();
+};
+
 const handleCpuStep = () => {
-  const ret = +cpu.step();
+  let ret: number;
+
+  try {
+    ret = +cpu.step();
+  } catch (error) {
+    reportCpuFault(error);
+    return;
+  }
 
   if (ret & rv_worker_commands.SYNC_LISTENERS) {
     postCpuDump();
@@ -85,14 +111,19 @@ const handleCpuStep = () => {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const startRunLoop = async () => {
+  const generation = ++runGeneration;
+  const isCurrent = () => generation === runGeneration && !cpu.halted;
   const t0 = Date.now();
-  const freq = Math.max(1, cpu.frequency);
-  const cyclesPerWake = Math.max(1, Math.ceil(freq / 1000));
-  const sliceMs = (cyclesPerWake * 1000) / freq;
   let nextDeadline = Date.now();
 
-  while (!cpu.halted) {
-    for (let i = 0; i < cyclesPerWake && !cpu.halted; i++) {
+  while (isCurrent()) {
+    // @todo colocar aqui resolve o bug de nao mudar a fred...
+    // mas não sei se causa uma grande penalidade de performance
+    const freq = Number.isFinite(cpu.frequency) ? Math.max(1, cpu.frequency) : 1000;
+    const cyclesPerWake = Math.max(1, Math.ceil(freq / 1000));
+    const sliceMs = (cyclesPerWake * 1000) / freq;
+
+    for (let i = 0; i < cyclesPerWake && isCurrent(); i++) {
       handleCpuStep();
     }
 

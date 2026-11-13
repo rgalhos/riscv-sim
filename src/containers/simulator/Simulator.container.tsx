@@ -8,6 +8,7 @@ import { HexViewContainer } from "@/containers/hex-view/HexView.container";
 import { MemoryViewContainer } from "@/containers/memory-view/MemoryView.container";
 import { RegisterViewContainer } from "@/containers/register-view/RegisterView.container";
 import type { IAssemblerResult } from "@/hardware/common/simulator";
+import { EWorkerCommand, type IWorkerCPUDump } from "@/hardware/common/worker-service";
 import { errorsToDiagnostics, type IDiagnostic } from "@/hardware/rv32/language-service/rv32.diagnostics";
 import { useEditor } from "@/lib/contexts/editor.context";
 import { useSimulator } from "@/lib/contexts/simulator.context";
@@ -40,15 +41,19 @@ export function SimulatorContainer() {
     setPendingChanges(true);
   }
 
-  const onAssemble = useCallback(() => {
+  const onAssemble = useCallback((): IAssemblerResult | null => {
     if (!editor) {
       console.error("No editor!", { editor });
-      return;
+      return null;
     }
 
     const code = editor.getValue() as string;
 
     createSimulatorWorker();
+
+    if (!simulator.processor.halted) {
+      simulator.workerService.setHalted(true);
+    }
 
     try {
       const t0 = performance.now();
@@ -65,83 +70,75 @@ export function SimulatorContainer() {
 
       if (assembled.errors.length > 0) {
         console.log(`assembler: program contains ${assembled.errors.length} errors. not syncing with worker.`);
-        return;
+        return assembled;
       }
 
       simulator.syncWorker();
 
       toast.success("Your code has been assembled.");
+      return assembled;
     } catch (e) {
       toast.error("err: " + e?.toString());
+      return null;
     }
   }, [editor, simulator, createSimulatorWorker]);
 
-  const onToggleExecution = useCallback(() => {
-    if (!simulator) {
-      console.log("onToggleExecution: no simulator?????");
-      return;
-    } else if (!simulator.workerService.worker) {
-      onAssemble();
-    }
+  const ensureAssembled = useCallback((): IAssemblerResult | null => {
+    const needsAssemble = !simulator.workerService.worker || (pendingChanges && simulator.processor.halted);
+    const current = needsAssemble ? onAssemble() : program;
 
-    if (program.errors.length > 0) {
+    if (!current) return null;
+
+    if (current.errors.length > 0) {
       toast.warning("Fix all compilation errors and recompile before running", {
         action: { label: "Show errors", onClick: () => setSimulatorTab(ETabs.EDITOR) },
       });
 
-      return;
+      return null;
     }
+
+    return current;
+  }, [simulator, pendingChanges, onAssemble, program]);
+
+  const focusAfterNextDump = useCallback(
+    (current: IAssemblerResult) => {
+      if (!$settings.get().focusOnStep) return;
+
+      simulator.workerService.once(EWorkerCommand.CPU_DUMP, ({ data }: { data: IWorkerCPUDump }) => {
+        const line = current.instructions.find(({ address }) => address === data.cpu.pc)?.lineNumber;
+        if (line) focusLine(line);
+      });
+    },
+    [simulator, focusLine]
+  );
+
+  const onToggleExecution = useCallback(() => {
+    if (!ensureAssembled()) return;
 
     if (simulator.processor.halted) {
       simulator.workerService.runCode();
     } else {
       simulator.workerService.setHalted(true);
     }
-  }, [simulator, onAssemble, program]);
+  }, [simulator, ensureAssembled]);
 
   const onStepBack = useCallback(() => {
-    if (!simulator || !simulator.workerService.worker) {
+    if (!simulator.workerService.worker) {
       console.log("No simulator or worker");
       return;
     }
 
+    focusAfterNextDump(program);
     simulator.workerService.stepBack();
-
-    if ($settings.get().focusOnStep) {
-      const t = setTimeout(() => {
-        clearTimeout(t);
-
-        const line = program.instructions.find(({ address }) => address === simulator.processor.cpu.pc)?.lineNumber;
-        if (line) focusLine(line);
-      }, 15);
-    }
-  }, [simulator, program, focusLine]);
+  }, [simulator, program, focusAfterNextDump]);
 
   const onStep = useCallback(() => {
-    if (!simulator || !simulator.workerService.worker) {
-      console.log("No simulator or worker");
-      return;
-    }
+    const current = ensureAssembled();
+    if (!current) return;
 
-    if (program.errors.length > 0) {
-      toast.warning("Fix all compilation errors and recompile before running", {
-        action: { label: "Show errors", onClick: () => setSimulatorTab(ETabs.EDITOR) },
-      });
-
-      return;
-    }
-
+    focusAfterNextDump(current);
     simulator.workerService.stepCode();
-
-    if ($settings.get().focusOnStep) {
-      const t = setTimeout(() => {
-        clearTimeout(t);
-
-        const line = program.instructions.find(({ address }) => address === simulator.processor.cpu.pc)?.lineNumber;
-        if (line) focusLine(line);
-      }, 15);
-    }
-  }, [simulator, program, focusLine]);
+  }, [simulator, ensureAssembled, focusAfterNextDump]);
 
   const onToggleConsole = useCallback(() => {
     const panel = consolePanelRef.current;

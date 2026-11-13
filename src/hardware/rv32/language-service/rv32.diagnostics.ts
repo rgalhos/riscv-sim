@@ -157,7 +157,8 @@ function semanticErrorDiagnostic(e: Error, lines: string[]): IDiagnostic {
   const line = cause?.line ?? 1;
   const symbol = cause?.symbol;
   const rangeValue = (symbol && wordRange(lines, line, symbol)) || wholeLineRange(lines, line);
-  const message = symbol ? `${cause.message} (${symbol})` : (cause?.message ?? e.message);
+  const message =
+    symbol && !cause.symbolInMessage ? `${cause.message} (${symbol})` : (cause?.message ?? e.message);
 
   return diagnostic(rangeValue, message, e.message);
 }

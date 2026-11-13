@@ -48,7 +48,7 @@ export function MemoSimulatorActions(props: {
     () => [
       {
         Icon: cpuHalted ? <Play color="var(--catppuccin-green)" /> : <Pause color="var(--catppuccin-red)" />,
-        label: "Run program",
+        label: cpuHalted ? "Run program" : "Pause program",
         action: props.onToggleExecution,
       },
       {
